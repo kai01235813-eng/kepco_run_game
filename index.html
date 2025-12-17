@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>KEPCO RUN GAME</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            touch-action: none;
+        }
+        
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: #000;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+        
+        #gameCanvas {
+            display: block;
+            border: 3px solid #FF6B00;
+            box-shadow: 0 0 20px rgba(255, 107, 0, 0.5);
+            touch-action: none;
+        }
+        
+        #loadingScreen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #FFF;
+            font-size: 24px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="loadingScreen">이미지 로딩 중...</div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // ==========================================
+        // 텔레그램 WebApp 초기화
+        // ==========================================
+        const tg = window.Telegram?.WebApp;
+        if (tg) {
+            tg.ready();
+            tg.expand();
+        }
+        
+        // ==========================================
+        // 게임 설정 및 변수
+        // ==========================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const loadingScreen = document.getElementById('loadingScreen');
+        
+        // 캔버스 크기 설정
+        canvas.width = Math.min(window.innerWidth, 800);
+        canvas.height = Math.min(window.innerHeight, 600);
+        
+        // 게임 상태
+        const GAME_STATE = {
+            LOADING: 0,
+            START: 1,
+            PLAYING: 2,
+            GAME_OVER: 3
+        };
+        
+        let gameState = GAME_STATE.LOADING;
+        let score = 0;
+        let distance = 0;
+        let gameSpeed = 3;
+        let baseSpeed = 3;
+        let frameCount = 0;
+        let menuBlink = 0;
+        let screenFlash = 0;
+        
+        // ==========================================
+        // 이미지 로딩
+        // ==========================================
+        const images = {
+            player: new Image(),
+            obstacle: new Image(),
+            bg: new Image(),
+            bird: new Image()
+        };
+        
+        let imagesLoaded = 0;
+        const totalImages = 4;
+        
+        // 이미지 로드 완료 체크
+        function onImageLoad() {
+            imagesLoaded++;
+            loadingScreen.textContent = `이미지 로딩 중... (${imagesLoaded}/${totalImages})`;
+            
+            if (imagesLoaded === totalImages) {
+                loadingScreen.style.display = 'none';
+                gameState = GAME_STATE.START;
+            }
+        }
+        
+        // 이미지 버전 (캐시 버스팅용) - 이미지 업데이트 시 이 값을 변경하세요
+        const IMAGE_VERSION = 'v2.0';
+        
+        // 이미지 로드 시작 (캐시 버스팅 적용)
+        images.player.onload = onImageLoad;
+        images.player.onerror = () => {
+            console.warn('player.png를 로드할 수 없습니다. 기본 그래픽을 사용합니다.');
+            images.player = null;
+            onImageLoad();
+        };
+        images.player.src = `player.png?v=${IMAGE_VERSION}`;
+        
+        images.obstacle.onload = onImageLoad;
+        images.obstacle.onerror = () => {
+            console.warn('obstacle.png를 로드할 수 없습니다. 기본 그래픽을 사용합니다.');
+            images.obstacle = null;
+            onImageLoad();
+        };
+        images.obstacle.src = `obstacle.png?v=${IMAGE_VERSION}`;
+        
+        images.bg.onload = onImageLoad;
+        images.bg.onerror = () => {
+            console.warn('bg.png를 로드할 수 없습니다. 기본 그래픽을 사용합니다.');
+            images.bg = null;
+            onImageLoad();
+        };
+        images.bg.src = `bg.png?v=${IMAGE_VERSION}`;
+        
+        images.bird.onload = onImageLoad;
+        images.bird.onerror = () => {
+            console.warn('bird.png를 로드할 수 없습니다. 기본 그래픽을 사용합니다.');
+            images.bird = null;
+            onImageLoad();
+        };
+        images.bird.src = `bird.png?v=${IMAGE_VERSION}`;
+        
+        // ==========================================
+        // 파티클 시스템
+        // ==========================================
+        class Particle {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 10;
+                this.vy = (Math.random() - 0.5) * 10;
+                this.life = 1.0;
+                this.decay = 0.02;
+                this.size = Math.random() * 5 + 3;
+                this.color = `hsl(${Math.random() * 60 + 30}, 100%, 60%)`;
+            }
+            
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.3; // 중력
+                this.life -= this.decay;
+            }
+            
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = this.life;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+            
+            isDead() {
+                return this.life <= 0;
+            }
+        }
+        
+        // ==========================================
+        // 플레이어 클래스 (스프라이트 애니메이션)
+        // ==========================================
+        class Player {
+            constructor() {
+                // 화면 표시 크기 (고정값 - 이미지 크기와 무관하게 화면에 보일 크기)
+                this.gameWidth = 100; // 화면에 보일 너비 (약 100px)
+                this.gameHeight = 100; // 화면에 보일 높이 (비율에 맞춰 조정)
+                
+                // 충돌 박스 크기 (게임 로직용)
+                this.width = this.gameWidth;
+                this.height = this.gameHeight;
+                this.normalHeight = this.gameHeight;
+                this.slideHeight = this.gameHeight * 0.5; // 슬라이딩 시 높이를 절반으로
+                
+                this.x = 100;
+                this.y = canvas.height - 150;
+                this.groundY = canvas.height - 150;
+                this.velocityY = 0;
+                this.jumpPower = -15;
+                this.gravity = 0.8;
+                this.isJumping = false;
+                this.isSliding = false;
+                this.jumpCount = 0;
+                this.maxJumps = 2;
+                
+                // 스프라이트 애니메이션 설정
+                this.frameX = 0; // 현재 보여줄 프레임 인덱스 (0 ~ 3)
+                this.maxFrame = 4; // 총 프레임 수
+                this.fps = 10; // 애니메이션 속도 조절 (초당 프레임 수)
+                this.frameTimer = 0; // 프레임 시간 측정용
+                this.frameInterval = 1000 / this.fps; // 프레임 전환 간격 (밀리초)
+                
+                // 스프라이트 시트 정보 (원본 이미지에서 잘라낼 크기)
+                this.spriteWidth = 0; // 이미지 로드 후 설정 (원본 이미지에서 한 프레임의 실제 너비)
+                this.spriteHeight = 0; // 이미지 로드 후 설정 (원본 이미지 높이)
+                this.image = null; // 이미지 참조
+                this.trimX = 0; // 트리밍 여백 (옆 프레임 침범 방지)
+            }
+            
+            initSprite() {
+                if (images.player && images.player.complete && images.player.width > 0) {
+                    this.image = images.player;
+                    
+                    // 원본 이미지에서 스프라이트 시트 크기 계산
+                    // player.png의 전체 너비를 4로 나눈 값이 원본 이미지에서 한 프레임의 실제 너비
+                    // AI 이미지 특성상 4등분 했을 때 오차가 있을 수 있으므로 여유를 둠
+                    this.spriteWidth = images.player.width / this.maxFrame;
+                    this.spriteHeight = images.player.height;
+                    
+                    // 트리밍 여백 설정 (옆 프레임 침범 방지)
+                    // 좌우 여백을 15px 정도 깎아내서 옆 캐릭터가 보이지 않도록 함
+                    this.trimX = 15; // 좌우 여백 (픽셀) - 이 값을 조절해서 해결
+                    
+                    // 디버깅: 이미지 크기 확인
+                    console.log('Player sprite initialized:', {
+                        imageWidth: images.player.width,
+                        imageHeight: images.player.height,
+                        spriteWidth: this.spriteWidth,
+                        spriteHeight: this.spriteHeight,
+                        maxFrame: this.maxFrame,
+                        trimX: this.trimX,
+                        actualFrameWidth: this.spriteWidth - (this.trimX * 2),
+                        gameWidth: this.gameWidth,
+                        gameHeight: this.gameHeight
+                    });
+                    
+                    // 프레임 간격 재계산
+                    this.frameInterval = 1000 / this.fps;
+                } else {
+                    // 이미지가 없을 때 기본값
+                    this.gameWidth = 40;
+                    this.gameHeight = 60;
+                    this.width = 40;
+                    this.height = 60;
+                    this.normalHeight = 60;
+                    this.slideHeight = 30;
+                    this.trimX = 0;
+                }
+            }
+            
+            update(deltaTime) {
+                // deltaTime이 너무 크면 제한 (첫 프레임 보정)
+                const clampedDelta = Math.min(deltaTime, 100);
+                
+                // 스프라이트 애니메이션 업데이트 (달리기 중일 때만)
+                if (!this.isJumping && !this.isSliding) {
+                    this.frameTimer += clampedDelta;
+                    if (this.frameTimer >= this.frameInterval) {
+                        this.frameTimer = 0;
+                        // 0 -> 1 -> 2 -> 3 -> 0 반복
+                        this.frameX = (this.frameX + 1) % this.maxFrame;
+                    }
+                } else if (this.isJumping) {
+                    // 점프 중에는 2번째 프레임 고정 (인덱스 1)
+                    this.frameX = 1;
+                    this.frameTimer = 0;
+                } else if (this.isSliding) {
+                    // 슬라이딩 중에는 4번째 프레임 고정 (인덱스 3)
+                    this.frameX = 3;
+                    this.frameTimer = 0;
+                }
+                
+                // 중력 적용
+                if (this.isJumping || this.y < this.groundY) {
+                    this.velocityY += this.gravity;
+                    this.y += this.velocityY;
+                    
+                    if (this.y >= this.groundY) {
+                        this.y = this.groundY;
+                        this.velocityY = 0;
+                        this.isJumping = false;
+                        this.jumpCount = 0;
+                    }
+                }
+            }
+            
+            jump() {
+                if (this.jumpCount < this.maxJumps) {
+                    this.velocityY = this.jumpPower;
+                    this.isJumping = true;
+                    this.jumpCount++;
+                    this.isSliding = false;
+                }
+            }
+            
+            slide() {
+                this.isSliding = true;
+            }
+            
+            stopSlide() {
+                this.isSliding = false;
+            }
+            
+            draw() {
+                const currentHeight = this.isSliding ? this.slideHeight : this.normalHeight;
+                const slideOffset = this.isSliding ? (this.normalHeight - this.slideHeight) : 0;
+                
+                if (this.image && this.image.complete && this.image.width > 0 && this.spriteWidth > 0 && this.spriteHeight > 0) {
+                    // 프레임 인덱스 범위 체크 및 보정
+                    if (this.frameX < 0) {
+                        this.frameX = 0;
+                    } else if (this.frameX >= this.maxFrame) {
+                        this.frameX = this.maxFrame - 1;
+                    }
+                    
+                    // Source (원본 이미지에서 잘라낼 부분) - 정확한 좌표 계산
+                    // 옆 프레임 침범 방지를 위해 트리밍 여백 적용
+                    // 시작점을 살짝 오른쪽으로 이동하여 옆 프레임 제거
+                    const baseSx = this.frameX * this.spriteWidth; // 프레임의 기본 시작 x 좌표
+                    const sx = baseSx + this.trimX; // sx: 시작점을 살짝 오른쪽으로 이동
+                    const sy = 0; // y 좌표는 항상 0 (가로로만 배치된 스프라이트)
+                    // sWidth: 너비를 줄여서 옆사람 침범 방지
+                    const sWidth = this.spriteWidth - (this.trimX * 2);
+                    const sHeight = this.spriteHeight; // 원본 이미지에서 잘라낼 높이 (전체 높이)
+                    
+                    // 안전장치: sx가 이미지 범위를 벗어나지 않도록 최종 체크
+                    if (sx + sWidth > this.image.width || sx < 0 || sWidth <= 0) {
+                        console.error('Sprite frame out of bounds!', {
+                            frameX: this.frameX,
+                            sx: sx,
+                            sWidth: sWidth,
+                            imageWidth: this.image.width,
+                            spriteWidth: this.spriteWidth,
+                            trimX: this.trimX
+                        });
+                        // 안전한 프레임으로 조정
+                        this.frameX = 0;
+                        return; // 다음 프레임에서 다시 시도
+                    }
+                    
+                    // Destination (화면에 그릴 위치와 크기)
+                    const dx = this.x; // 화면 x 좌표
+                    const dy = this.y + slideOffset; // 화면 y 좌표
+                    const dWidth = this.gameWidth; // 화면에 그릴 축소된 너비 (고정값)
+                    const dHeight = currentHeight; // 화면에 그릴 축소된 높이
+                    
+                    // 슬라이딩 시 스케일 조정
+                    if (this.isSliding) {
+                        ctx.save();
+                        ctx.translate(this.x + this.gameWidth / 2, this.y + slideOffset + currentHeight / 2);
+                        ctx.scale(1, currentHeight / this.normalHeight);
+                        // 스프라이트 시트에서 정확히 한 프레임만 잘라서 그리기
+                        ctx.drawImage(
+                            this.image,
+                            sx, sy, sWidth, sHeight, // 원본에서 잘라낼 부분 (정확히 한 프레임만)
+                            -this.gameWidth / 2, -currentHeight / 2, // 화면 위치 (중앙 기준)
+                            dWidth, dHeight // 화면에 그릴 축소된 크기
+                        );
+                        ctx.restore();
+                    } else {
+                        // 일반 상태: 스프라이트 시트에서 frameX번째 프레임만 정확히 잘라서 축소해서 그리기
+                        // drawImage의 9개 파라미터를 사용하여 정확히 한 프레임만 잘라냄
+                        ctx.drawImage(
+                            this.image,
+                            sx, sy, sWidth, sHeight, // 원본에서 잘라낼 부분 (한 프레임만 - 이게 핵심!)
+                            dx, dy, // 화면 위치
+                            dWidth, dHeight // 화면에 그릴 축소된 크기 (고정값 사용)
+                        );
+                    }
+                } else {
+                    // 이미지가 없을 때 기본 그래픽
+                    ctx.save();
+                    ctx.fillStyle = '#0066CC';
+                    ctx.fillRect(this.x, this.y + slideOffset, this.gameWidth, currentHeight - 20);
+                    ctx.fillStyle = '#FFD700';
+                    ctx.fillRect(this.x + 5, this.y + slideOffset, this.gameWidth - 10, 15);
+                    ctx.fillStyle = '#FFDBAC';
+                    ctx.beginPath();
+                    ctx.arc(this.x + this.gameWidth / 2, this.y + slideOffset + 20, 8, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#000';
+                    ctx.fillRect(this.x + this.gameWidth / 2 - 6, this.y + slideOffset + 18, 3, 3);
+                    ctx.fillRect(this.x + this.gameWidth / 2 + 3, this.y + slideOffset + 18, 3, 3);
+                    ctx.restore();
+                }
+            }
+            
+            getBounds() {
+                const currentHeight = this.isSliding ? this.slideHeight : this.normalHeight;
+                const slideOffset = this.isSliding ? (this.normalHeight - this.slideHeight) : 0;
+                return {
+                    x: this.x,
+                    y: this.y + slideOffset,
+                    width: this.gameWidth, // 충돌 박스는 화면 표시 크기 사용
+                    height: currentHeight
+                };
+            }
+        }
+        
+        // ==========================================
+        // 장애물 클래스
+        // ==========================================
+        class Obstacle {
+            constructor(type, y) {
+                this.type = type; // 'ground' or 'air'
+                // 장애물 크기 키우기
+                this.width = 60; // 40 -> 60
+                this.height = type === 'ground' ? 70 : 60; // 50/40 -> 70/60
+                this.x = canvas.width;
+                this.y = y || (type === 'ground' ? canvas.height - 150 : canvas.height - 300);
+                this.speed = gameSpeed;
+            }
+            
+            update() {
+                this.x -= this.speed;
+            }
+            
+            draw() {
+                if (this.type === 'ground' && images.obstacle) {
+                    // 바닥 장애물: obstacle.png 사용
+                    ctx.drawImage(
+                        images.obstacle,
+                        this.x, this.y, this.width, this.height
+                    );
+                } else if (this.type === 'air' && images.bird) {
+                    // 공중 장애물: bird.png 사용
+                    ctx.drawImage(
+                        images.bird,
+                        this.x, this.y, this.width, this.height
+                    );
+                } else if (this.type === 'air') {
+                    // bird.png가 없을 때 기본 그래픽 (빨간색 원)
+                    ctx.fillStyle = '#FF0000';
+                    ctx.beginPath();
+                    ctx.arc(this.x + this.width / 2, this.y + this.height / 2, this.width / 2, 0, Math.PI * 2);
+                    ctx.fill();
+                } else if (this.type === 'ground') {
+                    // obstacle.png가 없을 때 기본 그래픽
+                    ctx.fillStyle = '#FF6B00';
+                    ctx.beginPath();
+                    ctx.moveTo(this.x + this.width / 2, this.y);
+                    ctx.lineTo(this.x, this.y + this.height);
+                    ctx.lineTo(this.x + this.width, this.y + this.height);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            }
+            
+            getBounds() {
+                return {
+                    x: this.x,
+                    y: this.y,
+                    width: this.width,
+                    height: this.height
+                };
+            }
+            
+            isOffScreen() {
+                return this.x + this.width < 0;
+            }
+        }
+        
+        // ==========================================
+        // 코인 클래스
+        // ==========================================
+        class Coin {
+            constructor() {
+                this.width = 30;
+                this.height = 30;
+                this.x = canvas.width;
+                this.y = Math.random() > 0.5 ? canvas.height - 200 : canvas.height - 350;
+                this.speed = gameSpeed;
+                this.rotation = 0;
+                this.collected = false;
+            }
+            
+            update() {
+                this.x -= this.speed;
+                this.rotation += 0.2;
+            }
+            
+            draw() {
+                if (this.collected) return;
+                
+                ctx.save();
+                ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+                ctx.rotate(this.rotation);
+                
+                // 노란색 번개 모양 동전
+                ctx.fillStyle = '#FFD700';
+                ctx.strokeStyle = '#FFA500';
+                ctx.lineWidth = 2;
+                
+                ctx.beginPath();
+                ctx.moveTo(0, -this.height / 2);
+                ctx.lineTo(-this.width / 4, 0);
+                ctx.lineTo(this.width / 8, 0);
+                ctx.lineTo(-this.width / 8, this.height / 2);
+                ctx.lineTo(this.width / 4, -this.height / 4);
+                ctx.lineTo(-this.width / 8, -this.height / 4);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+                
+                ctx.restore();
+            }
+            
+            getBounds() {
+                return {
+                    x: this.x,
+                    y: this.y,
+                    width: this.width,
+                    height: this.height
+                };
+            }
+            
+            isOffScreen() {
+                return this.x + this.width < 0;
+            }
+        }
+        
+        // ==========================================
+        // 배경 클래스 (패럴랙스 스크롤링)
+        // ==========================================
+        class Background {
+            constructor() {
+                this.x1 = 0;
+                this.x2 = 0;
+                this.speed = gameSpeed * 0.3; // 캐릭터보다 느리게
+                this.imageWidth = 0;
+            }
+            
+            init() {
+                if (images.bg && images.bg.complete && images.bg.width > 0 && images.bg.height > 0) {
+                    this.imageWidth = images.bg.width;
+                    // 두 번째 배경을 첫 번째 바로 뒤에 배치 (빈틈없이)
+                    this.x2 = this.imageWidth;
+                } else {
+                    // 이미지가 없을 때 기본 너비
+                    this.imageWidth = canvas.width;
+                    this.x2 = this.imageWidth;
+                }
+            }
+            
+            update() {
+                this.speed = gameSpeed * 0.3;
+                this.x1 -= this.speed;
+                this.x2 -= this.speed;
+                
+                // 이미지가 로드되었을 때만 스케일 계산
+                let scaledWidth = this.imageWidth;
+                if (images.bg && images.bg.complete && this.imageWidth > 0 && images.bg.height > 0) {
+                    const bgHeight = images.bg.height;
+                    const scale = canvas.height / bgHeight;
+                    scaledWidth = this.imageWidth * scale;
+                    
+                    // 안전장치: 무한 반복 로직 - 빈틈없이 이어 붙이기
+                    // 첫 번째 이미지가 화면 밖으로 나가면 두 번째 뒤로 이동
+                    if (this.x1 + scaledWidth <= 0) {
+                        this.x1 = this.x2 + scaledWidth; // 두 번째 배경 바로 뒤에 배치
+                    }
+                    // 두 번째 이미지가 화면 밖으로 나가면 첫 번째 뒤로 이동
+                    if (this.x2 + scaledWidth <= 0) {
+                        this.x2 = this.x1 + scaledWidth; // 첫 번째 배경 바로 뒤에 배치
+                    }
+                    
+                    // 추가 안전장치: 두 배경이 너무 멀어지면 재배치
+                    const distance = Math.abs(this.x2 - this.x1);
+                    if (distance > scaledWidth * 2) {
+                        // 배경이 너무 멀어졌으면 재배치
+                        if (this.x1 < this.x2) {
+                            this.x2 = this.x1 + scaledWidth;
+                        } else {
+                            this.x1 = this.x2 + scaledWidth;
+                        }
+                    }
+                }
+            }
+            
+            draw() {
+                if (images.bg && images.bg.complete && this.imageWidth > 0 && images.bg.height > 0) {
+                    // 배경 이미지 두 장을 이어 붙여서 무한 반복
+                    // 이미지가 화면을 완전히 덮도록 높이도 조정
+                    const bgHeight = images.bg.height;
+                    const scale = canvas.height / bgHeight; // 높이에 맞춰 스케일 계산
+                    const scaledWidth = this.imageWidth * scale;
+                    
+                    // 안전장치: 스케일된 너비가 0보다 큰지 확인
+                    if (scaledWidth <= 0) {
+                        // 기본 배경으로 대체
+                        const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+                        gradient.addColorStop(0, '#87CEEB');
+                        gradient.addColorStop(0.5, '#98D8E8');
+                        gradient.addColorStop(1, '#B8E6B8');
+                        ctx.fillStyle = gradient;
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        return;
+                    }
+                    
+                    // 배경 이미지 그리기 (빈틈없이 이어 붙이기)
+                    // 화면을 완전히 덮도록 여러 배경 그리기
+                    let currentX = this.x1;
+                    let drawCount = 0;
+                    const maxDraws = 5; // 최대 그리기 횟수 제한 (무한 루프 방지)
+                    
+                    // 왼쪽에서 오른쪽으로 배경 그리기
+                    while (currentX < canvas.width && drawCount < maxDraws) {
+                        ctx.drawImage(images.bg, currentX, 0, scaledWidth, canvas.height);
+                        currentX += scaledWidth;
+                        drawCount++;
+                    }
+                    
+                    // x2 배경도 그리기
+                    currentX = this.x2;
+                    drawCount = 0;
+                    while (currentX < canvas.width && drawCount < maxDraws) {
+                        ctx.drawImage(images.bg, currentX, 0, scaledWidth, canvas.height);
+                        currentX += scaledWidth;
+                        drawCount++;
+                    }
+                    
+                    // 왼쪽 화면 밖에도 배경 그리기 (빈 공간 방지)
+                    if (this.x1 < 0) {
+                        ctx.drawImage(images.bg, this.x1, 0, scaledWidth, canvas.height);
+                    }
+                    if (this.x2 < 0 && Math.abs(this.x2 - this.x1) > scaledWidth * 0.5) {
+                        ctx.drawImage(images.bg, this.x2, 0, scaledWidth, canvas.height);
+                    }
+                } else {
+                    // 이미지가 없을 때 기본 그라데이션 배경
+                    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+                    gradient.addColorStop(0, '#87CEEB');
+                    gradient.addColorStop(0.5, '#98D8E8');
+                    gradient.addColorStop(1, '#B8E6B8');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+            }
+        }
+        
+        // ==========================================
+        // 게임 객체
+        // ==========================================
+        const player = new Player();
+        const background = new Background();
+        let obstacles = [];
+        let coins = [];
+        let particles = [];
+        
+        // ==========================================
+        // 충돌 감지
+        // ==========================================
+        function checkCollision(rect1, rect2) {
+            return rect1.x < rect2.x + rect2.width &&
+                   rect1.x + rect1.width > rect2.x &&
+                   rect1.y < rect2.y + rect2.height &&
+                   rect1.y + rect1.height > rect2.y;
+        }
+        
+        // ==========================================
+        // 게임 초기화
+        // ==========================================
+        function initGame() {
+            obstacles = [];
+            coins = [];
+            particles = [];
+            player.x = 100;
+            player.y = player.groundY;
+            player.velocityY = 0;
+            player.isJumping = false;
+            player.isSliding = false;
+            player.jumpCount = 0;
+            player.frameX = 0;
+            player.frameTimer = 0;
+            score = 0;
+            distance = 0;
+            gameSpeed = baseSpeed;
+            frameCount = 0;
+            screenFlash = 0;
+            
+            // 플레이어 스프라이트 초기화
+            if (images.player && images.player.complete) {
+                player.initSprite();
+            } else if (images.player) {
+                // 이미지가 아직 로딩 중이면 로드 완료 후 초기화
+                images.player.addEventListener('load', () => {
+                    player.initSprite();
+                });
+            }
+            
+            // 배경 초기화
+            background.init();
+        }
+        
+        // ==========================================
+        // 게임 로직
+        // ==========================================
+        function spawnObstacle() {
+            if (obstacles.length === 0 || obstacles[obstacles.length - 1].x < canvas.width - 300) {
+                const type = Math.random() > 0.5 ? 'ground' : 'air';
+                const y = type === 'ground' 
+                    ? canvas.height - 150 
+                    : canvas.height - 300 + Math.random() * 50;
+                obstacles.push(new Obstacle(type, y));
+            }
+        }
+        
+        function spawnCoin() {
+            if (coins.length === 0 || coins[coins.length - 1].x < canvas.width - 200) {
+                if (Math.random() > 0.7) {
+                    coins.push(new Coin());
+                }
+            }
+        }
+        
+        // ==========================================
+        // 렌더링 함수
+        // ==========================================
+        function drawStartScreen() {
+            // 배경 그리기
+            background.draw();
+            
+            // 타이틀
+            ctx.fillStyle = '#FF6B00';
+            ctx.font = 'bold 60px Courier New';
+            ctx.textAlign = 'center';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 3;
+            ctx.strokeText('KEPCO RUN GAME', canvas.width / 2, canvas.height / 2 - 50);
+            ctx.fillText('KEPCO RUN GAME', canvas.width / 2, canvas.height / 2 - 50);
+            
+            // 시작 안내 (깜빡임 효과)
+            if (Math.floor(menuBlink / 30) % 2 === 0) {
+                ctx.fillStyle = '#0066CC';
+                ctx.font = 'bold 24px Courier New';
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                ctx.strokeText('Press Space or Touch to Start', canvas.width / 2, canvas.height / 2 + 50);
+                ctx.fillText('Press Space or Touch to Start', canvas.width / 2, canvas.height / 2 + 50);
+            }
+            
+            menuBlink++;
+        }
+        
+        function drawGame() {
+            // 배경 (패럴랙스 스크롤링)
+            background.draw();
+            
+            // 바닥
+            ctx.fillStyle = '#8B7355';
+            ctx.fillRect(0, canvas.height - 90, canvas.width, 90);
+            ctx.fillStyle = '#9B8565';
+            ctx.fillRect(0, canvas.height - 90, canvas.width, 5);
+            
+            // 장애물 그리기
+            obstacles.forEach(obstacle => {
+                obstacle.draw();
+            });
+            
+            // 코인 그리기
+            coins.forEach(coin => {
+                coin.draw();
+            });
+            
+            // 파티클 그리기
+            particles.forEach(particle => {
+                particle.draw();
+            });
+            
+            // 플레이어 그리기
+            player.draw();
+            
+            // UI
+            ctx.fillStyle = '#FFF';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.font = 'bold 20px Courier New';
+            ctx.textAlign = 'left';
+            
+            // 좌측 상단: Mileage
+            ctx.strokeText(`Mileage: ${score}`, 20, 30);
+            ctx.fillText(`Mileage: ${score}`, 20, 30);
+            
+            // 우측 상단: Distance
+            ctx.textAlign = 'right';
+            ctx.strokeText(`Distance: ${Math.floor(distance)}m`, canvas.width - 20, 30);
+            ctx.fillText(`Distance: ${Math.floor(distance)}m`, canvas.width - 20, 30);
+            ctx.textAlign = 'left';
+            
+            // 충돌 시 화면 깜빡임
+            if (screenFlash > 0) {
+                ctx.fillStyle = `rgba(255, 0, 0, ${screenFlash})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                screenFlash -= 0.1;
+            }
+        }
+        
+        function drawGameOver() {
+            // 반투명 배경
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // GAME OVER 텍스트
+            ctx.fillStyle = '#FF0000';
+            ctx.font = 'bold 60px Courier New';
+            ctx.textAlign = 'center';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 3;
+            ctx.strokeText('GAME OVER', canvas.width / 2, canvas.height / 2 - 100);
+            ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 100);
+            
+            // 점수 표시
+            ctx.fillStyle = '#FFF';
+            ctx.font = 'bold 30px Courier New';
+            ctx.strokeText(`최종 마일리지: ${score} 점`, canvas.width / 2, canvas.height / 2 - 20);
+            ctx.fillText(`최종 마일리지: ${score} 점`, canvas.width / 2, canvas.height / 2 - 20);
+            ctx.strokeText(`생존 거리: ${Math.floor(distance)}m`, canvas.width / 2, canvas.height / 2 + 20);
+            ctx.fillText(`생존 거리: ${Math.floor(distance)}m`, canvas.width / 2, canvas.height / 2 + 20);
+            
+            // 다시 도전하기 버튼
+            ctx.fillStyle = '#FF6B00';
+            ctx.fillRect(canvas.width / 2 - 150, canvas.height / 2 + 60, 300, 50);
+            ctx.fillStyle = '#FFF';
+            ctx.font = 'bold 24px Courier New';
+            ctx.strokeText('다시 도전하기', canvas.width / 2, canvas.height / 2 + 90);
+            ctx.fillText('다시 도전하기', canvas.width / 2, canvas.height / 2 + 90);
+        }
+        
+        // ==========================================
+        // 게임 루프
+        // ==========================================
+        let lastTime = 0;
+        
+        function gameLoop(timestamp) {
+            // deltaTime 계산 (밀리초 단위)
+            let deltaTime = timestamp - lastTime;
+            // 첫 프레임 보정 (deltaTime이 0이거나 너무 큰 경우)
+            if (lastTime === 0 || deltaTime > 100) {
+                deltaTime = 16; // 약 60fps 기준
+            }
+            lastTime = timestamp;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            frameCount++;
+            
+            if (gameState === GAME_STATE.START) {
+                background.update(); // 배경은 계속 움직임
+                drawStartScreen();
+            } else if (gameState === GAME_STATE.PLAYING) {
+                // 플레이어 업데이트 (deltaTime 전달)
+                player.update(deltaTime);
+                
+                // 배경 업데이트
+                background.update();
+                
+                // 장애물 업데이트
+                obstacles.forEach(obstacle => {
+                    obstacle.update();
+                });
+                
+                // 코인 업데이트
+                coins.forEach(coin => {
+                    coin.update();
+                });
+                
+                // 파티클 업데이트
+                particles.forEach(particle => {
+                    particle.update();
+                });
+                particles = particles.filter(p => !p.isDead());
+                
+                // 장애물 생성
+                if (frameCount % 120 === 0) {
+                    spawnObstacle();
+                }
+                
+                // 코인 생성
+                if (frameCount % 60 === 0) {
+                    spawnCoin();
+                }
+                
+                // 화면 밖으로 나간 객체 제거
+                obstacles = obstacles.filter(obstacle => !obstacle.isOffScreen());
+                coins = coins.filter(coin => !coin.isOffScreen() && !coin.collected);
+                
+                // 충돌 감지 - 장애물
+                const playerBounds = player.getBounds();
+                obstacles.forEach(obstacle => {
+                    if (checkCollision(playerBounds, obstacle.getBounds())) {
+                        screenFlash = 0.5;
+                        gameState = GAME_STATE.GAMEOVER;
+                        // 텔레그램에 점수 전송
+                        if (tg) {
+                            tg.sendData(JSON.stringify({score: score, distance: Math.floor(distance)}));
+                        }
+                    }
+                });
+                
+                // 충돌 감지 - 코인
+                coins.forEach(coin => {
+                    if (!coin.collected && checkCollision(playerBounds, coin.getBounds())) {
+                        coin.collected = true;
+                        score += 100;
+                        
+                        // 파티클 효과 생성
+                        for (let i = 0; i < 10; i++) {
+                            particles.push(new Particle(
+                                coin.x + coin.width / 2,
+                                coin.y + coin.height / 2
+                            ));
+                        }
+                    }
+                });
+                
+                // 거리 점수 증가
+                distance += gameSpeed * 0.1;
+                
+                // 속도 증가
+                if (frameCount % 300 === 0) {
+                    gameSpeed += 0.2;
+                    obstacles.forEach(obstacle => obstacle.speed = gameSpeed);
+                    coins.forEach(coin => coin.speed = gameSpeed);
+                }
+                
+                drawGame();
+            } else if (gameState === GAME_STATE.GAMEOVER) {
+                drawGameOver();
+            }
+            
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // ==========================================
+        // 입력 처리
+        // ==========================================
+        // 키보드 입력
+        document.addEventListener('keydown', (e) => {
+            if (gameState === GAME_STATE.START) {
+                if (e.code === 'Space' || e.key === 'ArrowUp') {
+                    initGame();
+                    gameState = GAME_STATE.PLAYING;
+                }
+            } else if (gameState === GAME_STATE.PLAYING) {
+                if (e.code === 'Space' || e.key === 'ArrowUp') {
+                    player.jump();
+                } else if (e.key === 'ArrowDown') {
+                    player.slide();
+                }
+            } else if (gameState === GAME_STATE.GAMEOVER) {
+                if (e.code === 'Space' || e.key === 'Enter') {
+                    initGame();
+                    gameState = GAME_STATE.PLAYING;
+                }
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            if (gameState === GAME_STATE.PLAYING && e.key === 'ArrowDown') {
+                player.stopSlide();
+            }
+        });
+        
+        // 터치 입력 (모바일)
+        let touchStartY = 0;
+        
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            touchStartY = touch.clientY - rect.top;
+            
+            if (gameState === GAME_STATE.START) {
+                initGame();
+                gameState = GAME_STATE.PLAYING;
+            } else if (gameState === GAME_STATE.PLAYING) {
+                // 화면 상단 터치 = 점프, 하단 터치 = 슬라이딩
+                if (touchStartY < canvas.height / 2) {
+                    player.jump();
+                } else {
+                    player.slide();
+                }
+            } else if (gameState === GAME_STATE.GAMEOVER) {
+                initGame();
+                gameState = GAME_STATE.PLAYING;
+            }
+        });
+        
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            if (gameState === GAME_STATE.PLAYING) {
+                player.stopSlide();
+            }
+        });
+        
+        // 마우스 클릭 (게임 오버 화면의 버튼)
+        canvas.addEventListener('click', (e) => {
+            if (gameState === GAME_STATE.GAMEOVER) {
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                
+                if (x >= canvas.width / 2 - 150 && x <= canvas.width / 2 + 150 &&
+                    y >= canvas.height / 2 + 60 && y <= canvas.height / 2 + 110) {
+                    initGame();
+                    gameState = GAME_STATE.PLAYING;
+                }
+            }
+        });
+        
+        // ==========================================
+        // 게임 시작
+        // ==========================================
+        gameLoop();
+    </script>
+</body>
+</html>
